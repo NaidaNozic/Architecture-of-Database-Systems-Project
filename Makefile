@@ -39,25 +39,25 @@ all: $(EXE_UT) $(EXE_ST)
 $(EXE_UT): $(SRCS_C_UT) $(SRCS_CPP) *.h
 	$(CC)   -c $(GENERAL) $(OPT) $(SRCS_C_UT)
 	$(CCPP) -c $(GENERAL) $(OPT) $(SRCS_CPP)
-	$(CCPP) -o $(EXE_UT) $(OBJS_UT)
+	$(CCPP) -o $(EXE_UT) $(OBJS_UT) -pthread
 	rm -f $(OBJS_UT)
 
 $(DBG_UT): $(SRCS_C_UT) $(SRCS_CPP) *.h
 	$(CC)   -c $(GENERAL) $(DBG) $(SRCS_C_UT)
 	$(CCPP) -c $(GENERAL) $(DBG) $(SRCS_CPP)
-	$(CCPP) -o $(DBG_UT) $(OBJS_UT)
+	$(CCPP) -o $(DBG_UT) $(OBJS_UT) -pthread
 	rm -f $(OBJS_UT)
 
 $(EXE_ST): $(SRCS_C_ST) $(SRCS_CPP) *.h
 	$(CC)   -c $(GENERAL) $(OPT) $(SRCS_C_ST)
 	$(CCPP) -c $(GENERAL) $(OPT) $(SRCS_CPP)
-	$(CCPP) -o $(EXE_ST) $(OBJS_ST)
+	$(CCPP) -o $(EXE_ST) $(OBJS_ST) -pthread
 	rm -f $(OBJS_ST)
 
 $(EXE_ST_BASE): $(SRCS_C_ST) $(SRCS_CPP_BASE) *.h
 	$(CC)   -c $(GENERAL) $(OPT) $(SRCS_C_ST)
 	$(CCPP) -c $(GENERAL) $(OPT) $(SRCS_CPP_BASE)
-	$(CCPP) -o $(EXE_ST_BASE) $(OBJS_ST_BASE)
+	$(CCPP) -o $(EXE_ST_BASE) $(OBJS_ST_BASE) -pthread
 	rm -f $(OBJS_ST_BASE)
 
 $(DBG_ST): $(SRCS_C_ST) $(SRCS_CPP) *.h

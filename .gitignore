@@ -9,3 +9,4 @@ debug_speed
 debug_speed.exe
 times_baseline.csv
 *.o
+.vscode/settings.json
