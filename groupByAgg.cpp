@@ -12,10 +12,12 @@
 #include <vector>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 
 // ****************************************************************************
 // Group-by operator with aggregation
 // ****************************************************************************
+std::mutex hashTableMutex;
 
 void threadFunction(
     Relation& inKeys,
@@ -24,7 +26,8 @@ void threadFunction(
     size_t numGrpCols, size_t* grpColIdxs,
     size_t numAggCols, size_t* aggColIdxs,
     AggFunc* aggFuncs,
-    std::unordered_map<Row, int64_t*>& ht
+    std::unordered_map<Row, int64_t*>& ht,
+    std::mutex& mutex
 ) {
     Row* keys = initRow(&inKeys);
     Row* vals = initRow(&inVals);
@@ -33,6 +36,7 @@ void threadFunction(
         getRow(keys, &inKeys, r);
         getRow(vals, &inVals, r);
         // Search the key combination in the hash-table.
+        std::lock_guard<std::mutex> lock(mutex);
         int64_t*& accs = ht[*keys];
         if(accs) {
             // This key combination is already in the hash-table.
@@ -69,13 +73,11 @@ void groupByAgg(
         size_t numAggCols, size_t* aggColIdxs, AggFunc* aggFuncs
 ) {
     size_t numThreads = std::thread::hardware_concurrency();
-    size_t chunkSize = 1;
-    if(in->numRows>30*numThreads){
-        chunkSize = in->numRows / numThreads;
-    }else{
-        chunkSize = in->numRows/2 <= 0 ? in->numRows : in->numRows/2;
+    size_t chunkSize = in->numRows / numThreads;
+    if(chunkSize == 0){
+        chunkSize = in->numRows;
+        numThreads = 1;
     }
-    numThreads = in->numRows/chunkSize + in->numRows % chunkSize;
 
     std::vector<std::unordered_map<Row, int64_t*>> threadHashTables(numThreads);
     std::vector<std::thread> threads;
@@ -88,7 +90,7 @@ void groupByAgg(
         size_t end = (i == numThreads - 1) ? in->numRows : (i + 1) * chunkSize;
 
         threads.emplace_back(threadFunction, std::ref(*inKeys), std::ref(*inVals), start, end, 
-                                numGrpCols, grpColIdxs, numAggCols, aggColIdxs, aggFuncs, std::ref(threadHashTables[i]));
+                                numGrpCols, grpColIdxs, numAggCols, aggColIdxs, aggFuncs, std::ref(threadHashTables[i]), std::ref(hashTableMutex));
     }
     for (auto& thread : threads) {
         thread.join();
