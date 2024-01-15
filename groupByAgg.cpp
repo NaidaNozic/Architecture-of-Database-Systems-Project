@@ -52,11 +52,12 @@ struct TreeNode {
 
 void threadMerge(TreeNode* node){
     if(node->children.size() == 2){
+        auto func = node->aggFuncs;
         for (auto entry : *node->children[1]->ht1){
             auto*& accs = (*node->children[0]->ht1)[entry.first];
             if (accs) {
                 for (size_t c = 0; c < node->numAggCols; ++c) {
-                    switch (node->aggFuncs[c]) {
+                    switch (func[c]) {
                         case AggFunc::SUM: accs[c] += entry.second[c]; break;
                         case AggFunc::MIN: accs[c] = std::min(accs[c], entry.second[c]); break;
                         case AggFunc::MAX: accs[c] = std::max(accs[c], entry.second[c]); break;
@@ -78,6 +79,7 @@ void threadMerge(TreeNode* node){
 void threadCreateHashTable(TreeNode* node) {
     Row* keys = initRow(node->inKeys);
     Row* vals = initRow(node->inVals);
+    auto func = node->aggFuncs;
 
     for (size_t r = node->start; r < node->end; ++r) {
         getRow(keys, node->inKeys, r);
@@ -87,7 +89,7 @@ void threadCreateHashTable(TreeNode* node) {
         if (accs) {
             for (size_t c = 0; c < node->numAggCols; ++c) {
                 int64_t val = getValueInt64(vals, c);
-                switch (node->aggFuncs[c]) {
+                switch (func[c]) {
                     case AggFunc::SUM: accs[c] += val; break;
                     case AggFunc::MIN: accs[c] = std::min(accs[c], val); break;
                     case AggFunc::MAX: accs[c] = std::max(accs[c], val); break;
@@ -146,8 +148,7 @@ void groupByAgg(
 ) {
     Relation* inKeys = project(in, numGrpCols, grpColIdxs);
     Relation* inVals = project(in, numAggCols, aggColIdxs);
-    size_t numThreads = std::thread::hardware_concurrency();
-    size_t treeDepth = static_cast<size_t>(std::ceil(std::log2(numThreads)));
+    size_t treeDepth = static_cast<size_t>(std::ceil(std::log2(std::thread::hardware_concurrency())));
 
     TreeNode* root = new TreeNode(
         inKeys,
@@ -165,12 +166,12 @@ void groupByAgg(
     res->cols = (void**)malloc(res->numCols * sizeof(void*));
 
     for (size_t c = 0; c < numGrpCols; c++) {
-        res->colTypes[c] = root->inKeys->colTypes[c];
+        res->colTypes[c] = inKeys->colTypes[c];
         res->cols[c] = (void*)malloc(res->numRows * sizeOfDataType(res->colTypes[c]));
     }
 
     for (size_t c = 0; c < numAggCols; c++) {
-        res->colTypes[numGrpCols + c] = getAggType(root->inVals->colTypes[c], aggFuncs[c]);
+        res->colTypes[numGrpCols + c] = getAggType(inVals->colTypes[c], aggFuncs[c]);
         res->cols[numGrpCols + c] = (void*)malloc(res->numRows * sizeOfDataType(res->colTypes[numGrpCols + c]));
     }
 
@@ -179,12 +180,12 @@ void groupByAgg(
     for (auto entry : *root->ht1) {
         getRow(dst, res, r++);
         Row keys = entry.first;
-        for (size_t c = 0; c < root->inKeys->numCols; c++)
+        for (size_t c = 0; c < inKeys->numCols; c++)
             memcpy(dst->values[c], keys.values[c], sizeOfDataType(root->inKeys->colTypes[c]));
         free(keys.values);
 
         int64_t* accs = entry.second;
-        for (size_t c = 0; c < root->inVals->numCols; c++) {
+        for (size_t c = 0; c < inVals->numCols; c++) {
             memcpy(dst->values[numGrpCols + c], &accs[c], sizeOfDataType(res->colTypes[numGrpCols + c]));
         }
         free(accs);
