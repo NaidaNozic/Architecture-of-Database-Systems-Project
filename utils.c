@@ -72,6 +72,7 @@ void getRow(Row* row, Relation* rel, size_t r) {
         row->values[c] = (int8_t*)(rel->cols[c]) + r * sizeOfDataType(rel->colTypes[c]);
 }
 
+
 void freeRow(Row* row) {
     // Don't free the column types, they still belong to the relation.
     free(row->values);
