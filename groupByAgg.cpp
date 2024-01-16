@@ -110,8 +110,7 @@ void threadCreateHashTable(TreeNode* node) {
 
 void buildTree(TreeNode* node, size_t depth) {
     if (depth == 0 || (node->end-node->start <= 100)) {
-        std::thread t(threadCreateHashTable, node);
-        t.join();
+        threadCreateHashTable(node);
         node->ht1 = &node->ht;
     } else {
         size_t mid = (node->start + node->end) / 2;
