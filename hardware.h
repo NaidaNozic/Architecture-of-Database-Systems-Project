@@ -15,7 +15,7 @@
  */
 
 // The number of physical cores.
-#define NUM_CORES 0
+#define NUM_CORES 4
 
 // The size of the level 1 data cache in bytes.
 #define L1_DATA_CACHE_SIZE_BYTES 0

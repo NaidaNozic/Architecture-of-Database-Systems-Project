@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <stdio.h>
+
 size_t sizeOfDataType(DataType dt) {
     switch(dt) {
         case INT16: return sizeof(int16_t);

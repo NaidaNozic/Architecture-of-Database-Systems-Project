@@ -4,7 +4,7 @@
 #include "api.h"
 #include "setmap_utils.h"
 #include "utils.h"
-#include "thread"
+#include <pthread.h>
 
 #include <functional>
 #include <unordered_map>
@@ -12,57 +12,63 @@
 #include <vector>
 #include <cstring>
 #include <iostream>
-#include <mutex>
+#include "hardware.h"
 
 // ****************************************************************************
 // Group-by operator with aggregation
 // ****************************************************************************
-std::mutex hashTableMutex;
 
-void threadFunction(
-    Relation& inKeys,
-    Relation& inVals,
-    size_t start, size_t end,
-    size_t numGrpCols, size_t* grpColIdxs,
-    size_t numAggCols, size_t* aggColIdxs,
-    AggFunc* aggFuncs,
-    std::unordered_map<Row, int64_t*>& ht,
-    std::mutex& mutex
-) {
-    Row* keys = initRow(&inKeys);
-    Row* vals = initRow(&inVals);
+struct ThreadParams {
+    Relation* inKeys;
+    Relation* inVals;
+    size_t start;
+    size_t end;
+    size_t numGrpCols;
+    size_t* grpColIdxs;
+    size_t numAggCols;
+    size_t* aggColIdxs;
+    AggFunc* aggFuncs;
+    std::unordered_map<Row, int64_t*>* ht;
+};
 
-    for(size_t r = start; r < end; ++r) {
-        getRow(keys, &inKeys, r);
-        getRow(vals, &inVals, r);
-        // Search the key combination in the hash-table.
-        std::lock_guard<std::mutex> lock(mutex);
-        int64_t*& accs = ht[*keys];
-        if(accs) {
+void* threadFunction(void* arg) {
+    ThreadParams* params = static_cast<ThreadParams*>(arg);
+
+    Row* keys = initRow(params->inKeys);
+    Row* vals = initRow(params->inVals);
+
+    for (size_t r = params->start; r < params->end; ++r) {
+        getRow(keys, params->inKeys, r);
+        getRow(vals, params->inVals, r);
+
+        int64_t*& accs = (*params->ht)[*keys];
+
+        if (accs) {
             // This key combination is already in the hash-table.
             // Update the accumulators.
-            for(size_t c = 0; c < numAggCols; ++c) {
+            for (size_t c = 0; c < params->numAggCols; ++c) {
                 int64_t val = getValueInt64(vals, c);
-                switch(aggFuncs[c]) {
+                switch (params->aggFuncs[c]) {
                     case AggFunc::SUM: accs[c] += val; break;
                     case AggFunc::MIN: accs[c] = std::min(accs[c], val); break;
                     case AggFunc::MAX: accs[c] = std::max(accs[c], val); break;
                     default: exit(EXIT_FAILURE);
                 }
             }
-        }
-        else {
+        } else {
             // This key combination is not in the hash-table yet.
             // Allocate and initialize the accumulators.
-            accs = (int64_t*)(malloc(numAggCols * sizeof(int64_t*)));
-            for(size_t c = 0; c < numAggCols; ++c){
+            accs = static_cast<int64_t*>(malloc(params->numAggCols * sizeof(int64_t*)));
+            for (size_t c = 0; c < params->numAggCols; ++c) {
                 accs[c] = getValueInt64(vals, c);
             }
             keys->values = (void**)malloc(keys->numCols * sizeof(void*));
         }
     }
+
     freeRow(keys);
     freeRow(vals);
+    return nullptr;
 }
 
 /* Student implementation of the `groupByAgg`-operator */
@@ -72,7 +78,7 @@ void groupByAgg(
         size_t numGrpCols, size_t* grpColIdxs,
         size_t numAggCols, size_t* aggColIdxs, AggFunc* aggFuncs
 ) {
-    size_t numThreads = std::thread::hardware_concurrency();
+    size_t numThreads = NUM_CORES;
     size_t chunkSize = in->numRows / numThreads;
     if(chunkSize == 0){
         chunkSize = in->numRows;
@@ -80,7 +86,8 @@ void groupByAgg(
     }
 
     std::vector<std::unordered_map<Row, int64_t*>> threadHashTables(numThreads);
-    std::vector<std::thread> threads;
+    pthread_t pthreads[numThreads];
+    ThreadParams threadParams[numThreads];
 
     Relation* inKeys = project(in, numGrpCols, grpColIdxs);
     Relation* inVals = project(in, numAggCols, aggColIdxs);
@@ -88,16 +95,20 @@ void groupByAgg(
     for (size_t i = 0; i < numThreads; ++i) {
         size_t start = i * chunkSize;
         size_t end = (i == numThreads - 1) ? in->numRows : (i + 1) * chunkSize;
+        threadParams[i] = {inKeys, inVals, start, end,
+                            numGrpCols, grpColIdxs, numAggCols, aggColIdxs, aggFuncs, &threadHashTables[i]};
 
-        threads.emplace_back(threadFunction, std::ref(*inKeys), std::ref(*inVals), start, end, 
-                                numGrpCols, grpColIdxs, numAggCols, aggColIdxs, aggFuncs, std::ref(threadHashTables[i]), std::ref(hashTableMutex));
+        int result = pthread_create(&pthreads[i], nullptr, threadFunction, &threadParams[i]);
+        if (result != 0) {
+            std::cerr << "Error creating thread: " << result << std::endl;
+            exit(EXIT_FAILURE);
+        }
     }
-    for (auto& thread : threads) {
-        thread.join();
+    for (size_t i = 0; i < numThreads; ++i) {
+        pthread_join(pthreads[i], nullptr);
     }
 
     std::unordered_map<Row, int64_t*>& ht = threadHashTables[0];
-
     for (size_t i = 1; i < numThreads; i++) {
         for (auto entry : threadHashTables[i]) {  
             auto*& accs = ht[entry.first];
