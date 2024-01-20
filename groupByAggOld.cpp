@@ -8,74 +8,40 @@
 
 #include <functional>
 #include <unordered_map>
+
 #include <vector>
 #include <cstring>
+#include <iostream>
 #include <mutex>
-#include <future>
 
 // ****************************************************************************
 // Group-by operator with aggregation
 // ****************************************************************************
+std::mutex hashTableMutex;
 
-
-
-/* Naive baseline implementation of the `groupByAgg`-operator */
-void groupByAgg(
-        Relation* res,
-        const Relation* in,
-        size_t numGrpCols, size_t* grpColIdxs,
-        size_t numAggCols, size_t* aggColIdxs, AggFunc* aggFuncs
+void threadFunction(
+    Relation& inKeys,
+    Relation& inVals,
+    size_t start, size_t end,
+    size_t numGrpCols, size_t* grpColIdxs,
+    size_t numAggCols, size_t* aggColIdxs,
+    AggFunc* aggFuncs,
+    std::unordered_map<Row, int64_t*>& ht,
+    std::mutex& mutex
 ) {
-    // Split the input relation into key and value columns, such that we can
-    // easily extract rows of key and value columns (no copying involved).
-    Relation* inKeys = project(in, numGrpCols, grpColIdxs);
-    Relation* inVals = project(in, numAggCols, aggColIdxs);
+    Row* keys = initRow(&inKeys);
+    Row* vals = initRow(&inVals);
 
-    // A hash-table for the hash-based grouping.
-    std::unordered_map<Row, int64_t*> ht;
-
-    // Iterate over the rows in the input relation, insert the tuples of keys
-    // into the hash table while maintaining the accumulators for all aggregate
-    // columns to create.
-    Row* keys = initRow(inKeys);
-    Row* vals = initRow(inVals);
-
-    // Faruk: here we will split into threads so we need some assistance
-    size_t numThreads = std::thread::hardware_concurrency();
-    size_t chunkSize = in->numRows / numThreads;
-
-    std::vector<std::future<void>> threads;
-    // Faruk: the hashtable will be split between threads and accumulated later 
-    //for (size_t i = 0; i < numThreads; ++i) {
-    //    auto stop =  in->numRows; 
-    //    if(i != numThreads - 1)
-    //        stop =  (i + 1) * chunkSize;
-
-    //    threads.emplace_back(std::async(std::launch::async, processPartOfHashTable, in, i*chunkSize, stop, numAggCols, aggFuncs));
-    //}
-
-    // Wait for all threads to finish
-    //for (auto& future : futures) {
-    //    future.get();
-    //}
-
-
-    //      sortiraj
-    //      PLAN
-    //      - kopiraj originalne podatke, hesiraj, za svaki zapis dodje thread
-    //      - napravi threadove hash group by
-    //      - kopiraj u finalnu strukturu 
-
-
-    for(size_t r = 0; r < in->numRows; r++) {
-        getRow(keys, inKeys, r);
-        getRow(vals, inVals, r);
+    for(size_t r = start; r < end; ++r) {
+        getRow(keys, &inKeys, r);
+        getRow(vals, &inVals, r);
         // Search the key combination in the hash-table.
+        std::lock_guard<std::mutex> lock(mutex);
         int64_t*& accs = ht[*keys];
         if(accs) {
             // This key combination is already in the hash-table.
             // Update the accumulators.
-            for(size_t c = 0; c < numAggCols; c++) {
+            for(size_t c = 0; c < numAggCols; ++c) {
                 int64_t val = getValueInt64(vals, c);
                 switch(aggFuncs[c]) {
                     case AggFunc::SUM: accs[c] += val; break;
@@ -89,27 +55,87 @@ void groupByAgg(
             // This key combination is not in the hash-table yet.
             // Allocate and initialize the accumulators.
             accs = (int64_t*)(malloc(numAggCols * sizeof(int64_t*)));
-            for(size_t c = 0; c < numAggCols; c++)
+            for(size_t c = 0; c < numAggCols; ++c){
                 accs[c] = getValueInt64(vals, c);
+            }
             keys->values = (void**)malloc(keys->numCols * sizeof(void*));
         }
     }
     freeRow(keys);
     freeRow(vals);
+}
+
+/* Student implementation of the `groupByAgg`-operator */
+void groupByAgg(
+        Relation* res,
+        const Relation* in,
+        size_t numGrpCols, size_t* grpColIdxs,
+        size_t numAggCols, size_t* aggColIdxs, AggFunc* aggFuncs
+) {
+    size_t numThreads = std::thread::hardware_concurrency();
+    size_t chunkSize = in->numRows / numThreads;
+    if(chunkSize == 0){
+        chunkSize = in->numRows;
+        numThreads = 1;
+    }
+
+    std::vector<std::unordered_map<Row, int64_t*>> threadHashTables(numThreads);
+    std::vector<std::thread> threads;
+
+    Relation* inKeys = project(in, numGrpCols, grpColIdxs);
+    Relation* inVals = project(in, numAggCols, aggColIdxs);
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        size_t start = i * chunkSize;
+        size_t end = (i == numThreads - 1) ? in->numRows : (i + 1) * chunkSize;
+
+        threads.emplace_back(threadFunction, std::ref(*inKeys), std::ref(*inVals), start, end, 
+                                numGrpCols, grpColIdxs, numAggCols, aggColIdxs, aggFuncs, std::ref(threadHashTables[i]), std::ref(hashTableMutex));
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    std::unordered_map<Row, int64_t*>& ht = threadHashTables[0];
+
+    for (size_t i = 1; i < numThreads; i++) {
+        for (auto entry : threadHashTables[i]) {  
+            auto*& accs = ht[entry.first];
+            if (accs) {
+                for (size_t c = 0; c < numAggCols; ++c) {
+                    switch (aggFuncs[c]) {
+                        case AggFunc::SUM: accs[c] += entry.second[c]; break;
+                        case AggFunc::MIN: accs[c] = std::min(accs[c], entry.second[c]); break;
+                        case AggFunc::MAX: accs[c] = std::max(accs[c], entry.second[c]); break;
+                        default: 
+                            std::cout << "Error: Unknown aggregation function encountered." << std::endl;
+                            exit(EXIT_FAILURE);
+                    }
+                }
+                free(entry.second);
+                free(entry.first.values);
+            } else {
+                accs = entry.second;
+            }
+        }
+    }
 
     // Initialize the result relation.
     res->numRows = ht.size();
     res->numCols = numGrpCols + numAggCols;
     res->colTypes = (DataType*)malloc(res->numCols * sizeof(DataType));
     res->cols = (void**)malloc(res->numCols * sizeof(void*));
+
     for(size_t c = 0; c < numGrpCols; c++) {
         res->colTypes[c] = inKeys->colTypes[c];
         res->cols[c] = (void*)malloc(res->numRows * sizeOfDataType(res->colTypes[c]));
     }
+
     for(size_t c = 0; c < numAggCols; c++) {
         res->colTypes[numGrpCols + c] = getAggType(inVals->colTypes[c], aggFuncs[c]);
         res->cols[numGrpCols + c] = (void*)malloc(res->numRows * sizeOfDataType(res->colTypes[numGrpCols + c]));
     }
+   
     // Populate the result with the data from the hash-table.
     size_t r = 0;
     Row* dst = initRow(res);
