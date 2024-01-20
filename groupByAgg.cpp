@@ -8,125 +8,205 @@
 
 #include <functional>
 #include <unordered_map>
+
 #include <vector>
 #include <cstring>
-#include <mutex>
-#include <future>
+#include <iostream>
+#include <cmath>
 
 // ****************************************************************************
 // Group-by operator with aggregation
 // ****************************************************************************
+struct TreeNode {
+    Relation* inKeys;
+    Relation* inVals;
+    size_t start;
+    size_t end;
+    size_t numAggCols;
+    AggFunc* aggFuncs;
+    std::unordered_map<Row, int64_t*> ht;
+    std::vector<TreeNode*> children;
+    std::unordered_map<Row, int64_t*>* ht1;
 
+    TreeNode(
+        Relation* inKeys,
+        Relation* inVals,
+        size_t start,
+        size_t end,
+        size_t numAggCols,
+        AggFunc* aggFuncs
+    ) : inKeys(inKeys),
+        inVals(inVals),
+        start(start),
+        end(end),
+        numAggCols(numAggCols),
+        aggFuncs(aggFuncs),
+        ht1(&ht) {}
 
+    ~TreeNode() {
+        for (auto child : children) {
+            delete child;
+        }
+    }
+};
 
-/* Naive baseline implementation of the `groupByAgg`-operator */
+void threadMerge(TreeNode* node){
+    if(node->children.size() == 2){
+        auto func = node->aggFuncs;
+        for (auto entry : *node->children[1]->ht1){
+            auto*& accs = (*node->children[0]->ht1)[entry.first];
+            if (accs) {
+                for (size_t c = 0; c < node->numAggCols; ++c) {
+                    switch (func[c]) {
+                        case AggFunc::SUM: accs[c] += entry.second[c]; break;
+                        case AggFunc::MIN: accs[c] = std::min(accs[c], entry.second[c]); break;
+                        case AggFunc::MAX: accs[c] = std::max(accs[c], entry.second[c]); break;
+                        default:
+                            std::cout << "Error: Unknown aggregation function encountered." << std::endl;
+                            exit(EXIT_FAILURE);
+                    }
+                }
+                free(entry.second);
+                free(entry.first.values);
+            } else {
+                accs = entry.second;
+            }
+        }
+    }
+    node->ht1 = node->children[0]->ht1;
+}
+
+void threadCreateHashTable(TreeNode* node) {
+    Row* keys = initRow(node->inKeys);
+    Row* vals = initRow(node->inVals);
+    auto func = node->aggFuncs;
+
+    for (size_t r = node->start; r < node->end; ++r) {
+        getRow(keys, node->inKeys, r);
+        getRow(vals, node->inVals, r);
+
+        int64_t*& accs = node->ht[*keys];
+        if (accs) {
+            size_t x = 0;
+            int64_t val = getValueInt64(vals, x);
+            switch (func[x]) {
+                    case AggFunc::SUM: 
+                        for (size_t c = 0; c < node->numAggCols; ++c) {
+                            int64_t val = getValueInt64(vals, c);
+                                accs[c] += val;
+                        }
+                        break;
+                    case AggFunc::MIN:
+                        for (size_t c = 0; c < node->numAggCols; ++c) {
+                            int64_t val = getValueInt64(vals, c);
+                                accs[c] = std::min(accs[c], val);
+                        }
+                        break;
+                    case AggFunc::MAX: 
+                        for (size_t c = 0; c < node->numAggCols; ++c) {
+                            int64_t val = getValueInt64(vals, c);
+                                accs[c] = std::max(accs[c], val);
+                        }
+                        break;
+                    default: exit(EXIT_FAILURE);
+                }
+        } else {
+            accs = (int64_t*)(malloc(node->numAggCols * sizeof(int64_t*)));
+            for (size_t c = 0; c < node->numAggCols; ++c) {
+                accs[c] = getValueInt64(vals, c);
+            }
+            keys->values = (void**)malloc(keys->numCols * sizeof(void*));
+        }
+    }
+    freeRow(keys);
+    freeRow(vals);
+}
+
+void buildTree(TreeNode* node, size_t depth) {
+    if (depth == 0 || (node->end-node->start <= 100)) {
+        threadCreateHashTable(node);
+        node->ht1 = &node->ht;
+    } else {
+        size_t mid = (node->start + node->end) / 2;
+        TreeNode* leftChild = new TreeNode(
+            node->inKeys, node->inVals,
+            node->start, mid,
+            node->numAggCols,
+            node->aggFuncs
+        );
+        TreeNode* rightChild = new TreeNode(
+            node->inKeys, node->inVals,
+            mid, node->end,
+            node->numAggCols,
+            node->aggFuncs
+        );
+
+        node->children.push_back(leftChild);
+        node->children.push_back(rightChild);
+
+        std::thread t1(buildTree, leftChild, depth - 1);
+        std::thread t2(buildTree, rightChild, depth - 1);
+
+        t1.join();
+        t2.join();
+        threadMerge(node);
+    }
+}
+
 void groupByAgg(
         Relation* res,
         const Relation* in,
         size_t numGrpCols, size_t* grpColIdxs,
         size_t numAggCols, size_t* aggColIdxs, AggFunc* aggFuncs
 ) {
-    // Split the input relation into key and value columns, such that we can
-    // easily extract rows of key and value columns (no copying involved).
     Relation* inKeys = project(in, numGrpCols, grpColIdxs);
     Relation* inVals = project(in, numAggCols, aggColIdxs);
+    size_t treeDepth = static_cast<size_t>(std::ceil(std::log2(std::thread::hardware_concurrency())));
 
-    // A hash-table for the hash-based grouping.
-    std::unordered_map<Row, int64_t*> ht;
+    TreeNode* root = new TreeNode(
+        inKeys,
+        inVals,
+        0, in->numRows,
+        numAggCols,
+        aggFuncs
+    );
+    buildTree(root, treeDepth);
 
-    // Iterate over the rows in the input relation, insert the tuples of keys
-    // into the hash table while maintaining the accumulators for all aggregate
-    // columns to create.
-    Row* keys = initRow(inKeys);
-    Row* vals = initRow(inVals);
-
-    // Faruk: here we will split into threads so we need some assistance
-    size_t numThreads = std::thread::hardware_concurrency();
-    size_t chunkSize = in->numRows / numThreads;
-
-    std::vector<std::future<void>> threads;
-    // Faruk: the hashtable will be split between threads and accumulated later 
-    //for (size_t i = 0; i < numThreads; ++i) {
-    //    auto stop =  in->numRows; 
-    //    if(i != numThreads - 1)
-    //        stop =  (i + 1) * chunkSize;
-
-    //    threads.emplace_back(std::async(std::launch::async, processPartOfHashTable, in, i*chunkSize, stop, numAggCols, aggFuncs));
-    //}
-
-    // Wait for all threads to finish
-    //for (auto& future : futures) {
-    //    future.get();
-    //}
-
-
-    //      sortiraj
-    //      PLAN
-    //      - kopiraj originalne podatke, hesiraj, za svaki zapis dodje thread
-    //      - napravi threadove hash group by
-    //      - kopiraj u finalnu strukturu 
-
-
-    for(size_t r = 0; r < in->numRows; r++) {
-        getRow(keys, inKeys, r);
-        getRow(vals, inVals, r);
-        // Search the key combination in the hash-table.
-        int64_t*& accs = ht[*keys];
-        if(accs) {
-            // This key combination is already in the hash-table.
-            // Update the accumulators.
-            for(size_t c = 0; c < numAggCols; c++) {
-                int64_t val = getValueInt64(vals, c);
-                switch(aggFuncs[c]) {
-                    case AggFunc::SUM: accs[c] += val; break;
-                    case AggFunc::MIN: accs[c] = std::min(accs[c], val); break;
-                    case AggFunc::MAX: accs[c] = std::max(accs[c], val); break;
-                    default: exit(EXIT_FAILURE);
-                }
-            }
-        }
-        else {
-            // This key combination is not in the hash-table yet.
-            // Allocate and initialize the accumulators.
-            accs = (int64_t*)(malloc(numAggCols * sizeof(int64_t*)));
-            for(size_t c = 0; c < numAggCols; c++)
-                accs[c] = getValueInt64(vals, c);
-            keys->values = (void**)malloc(keys->numCols * sizeof(void*));
-        }
-    }
-    freeRow(keys);
-    freeRow(vals);
-
-    // Initialize the result relation.
-    res->numRows = ht.size();
+    // Initialize the result relation and copy data from the root node.
+    res->numRows = (*root->ht1).size();
     res->numCols = numGrpCols + numAggCols;
     res->colTypes = (DataType*)malloc(res->numCols * sizeof(DataType));
     res->cols = (void**)malloc(res->numCols * sizeof(void*));
-    for(size_t c = 0; c < numGrpCols; c++) {
+
+    for (size_t c = 0; c < numGrpCols; c++) {
         res->colTypes[c] = inKeys->colTypes[c];
         res->cols[c] = (void*)malloc(res->numRows * sizeOfDataType(res->colTypes[c]));
     }
-    for(size_t c = 0; c < numAggCols; c++) {
+
+    for (size_t c = 0; c < numAggCols; c++) {
         res->colTypes[numGrpCols + c] = getAggType(inVals->colTypes[c], aggFuncs[c]);
         res->cols[numGrpCols + c] = (void*)malloc(res->numRows * sizeOfDataType(res->colTypes[numGrpCols + c]));
     }
-    // Populate the result with the data from the hash-table.
+
     size_t r = 0;
     Row* dst = initRow(res);
-    for(auto entry : ht) {
+    for (auto entry : *root->ht1) {
         getRow(dst, res, r++);
         Row keys = entry.first;
-        for(size_t c = 0; c < inKeys->numCols; c++)
-            memcpy(dst->values[c], keys.values[c], sizeOfDataType(inKeys->colTypes[c]));
+        for (size_t c = 0; c < inKeys->numCols; c++)
+            memcpy(dst->values[c], keys.values[c], sizeOfDataType(root->inKeys->colTypes[c]));
         free(keys.values);
+
         int64_t* accs = entry.second;
-        for(size_t c = 0; c < inVals->numCols; c++) {
+        for (size_t c = 0; c < inVals->numCols; c++) {
             memcpy(dst->values[numGrpCols + c], &accs[c], sizeOfDataType(res->colTypes[numGrpCols + c]));
         }
         free(accs);
     }
     freeRow(dst);
-    
+
     freeRelation(inKeys, 1, 0);
     freeRelation(inVals, 1, 0);
+
+    delete root; // Release memory used by the tree.
 }
