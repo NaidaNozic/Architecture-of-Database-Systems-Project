@@ -4,7 +4,7 @@
 #include "api.h"
 #include "setmap_utils.h"
 #include "utils.h"
-#include "thread"
+#include "hardware.h"
 
 #include <functional>
 #include <unordered_map>
@@ -13,10 +13,12 @@
 #include <cstring>
 #include <iostream>
 #include <cmath>
+#include <pthread.h>
 
 // ****************************************************************************
 // Group-by operator with aggregation
 // ****************************************************************************
+
 struct TreeNode {
     Relation* inKeys;
     Relation* inVals;
@@ -48,6 +50,11 @@ struct TreeNode {
             delete child;
         }
     }
+};
+
+struct ThreadParams {
+    TreeNode* node;
+    size_t numThreads;
 };
 
 void threadMerge(TreeNode* node){
@@ -108,8 +115,57 @@ void threadCreateHashTable(TreeNode* node) {
     freeRow(vals);
 }
 
-void buildTree(TreeNode* node, size_t depth) {
-    if (depth == 0 || (node->end-node->start <= 100)) {
+void* buildTree(void* arg) {
+    ThreadParams* params = static_cast<ThreadParams*>(arg);
+
+    if (params->numThreads == 1 || (params->node->end - params->node->start <= 100)) {
+        threadCreateHashTable(params->node);
+        params->node->ht1 = &params->node->ht;
+    } else {
+        size_t mid = (params->node->start + params->node->end) / 2;
+        TreeNode* leftChild = new TreeNode(
+            params->node->inKeys, params->node->inVals,
+            params->node->start, mid,
+            params->node->numAggCols,
+            params->node->aggFuncs
+        );
+        TreeNode* rightChild = new TreeNode(
+            params->node->inKeys, params->node->inVals,
+            mid, params->node->end,
+            params->node->numAggCols,
+            params->node->aggFuncs
+        );
+
+        params->node->children.push_back(leftChild);
+        params->node->children.push_back(rightChild);
+
+        pthread_t pthread1;
+        pthread_t pthread2;
+        ThreadParams threadParams1 = {leftChild, static_cast<size_t>(std::ceil(params->numThreads / 2.0))};
+        ThreadParams threadParams2 = {rightChild, params->numThreads - static_cast<size_t>(std::ceil(params->numThreads / 2.0))};
+
+        int result1 = pthread_create(&pthread1, nullptr, buildTree, &threadParams1);
+        if (result1 != 0) {
+            std::cerr << "Error creating thread: " << result1 << std::endl;
+            exit(EXIT_FAILURE);
+        }
+
+        int result2 = pthread_create(&pthread2, nullptr, buildTree, &threadParams2);
+        if (result2 != 0) {
+            std::cerr << "Error creating thread: " << result2 << std::endl;
+            exit(EXIT_FAILURE);
+        }
+
+        pthread_join(pthread1, nullptr);
+        pthread_join(pthread2, nullptr);
+
+        threadMerge(params->node);
+    }
+    return nullptr;
+}
+
+void buildRoot(TreeNode* node, size_t numThreads) {
+    if (numThreads == 1 || (node->end-node->start <= 100)) {
         threadCreateHashTable(node);
         node->ht1 = &node->ht;
     } else {
@@ -130,11 +186,26 @@ void buildTree(TreeNode* node, size_t depth) {
         node->children.push_back(leftChild);
         node->children.push_back(rightChild);
 
-        std::thread t1(buildTree, leftChild, depth - 1);
-        std::thread t2(buildTree, rightChild, depth - 1);
+        pthread_t pthread1;
+        pthread_t pthread2;
+        ThreadParams threadParams1 = {leftChild, static_cast<size_t>(std::ceil(numThreads / 2.0))};
+        ThreadParams threadParams2 = {rightChild, numThreads-static_cast<size_t>(std::ceil(numThreads / 2.0))};
 
-        t1.join();
-        t2.join();
+        int result1 = pthread_create(&pthread1, nullptr, buildTree, &threadParams1);
+        if (result1 != 0) {
+            std::cerr << "Error creating thread: " << result1 << std::endl;
+            exit(EXIT_FAILURE);
+        }
+
+        int result2 = pthread_create(&pthread2, nullptr, buildTree, &threadParams2);
+        if (result2 != 0) {
+            std::cerr << "Error creating thread: " << result2 << std::endl;
+            exit(EXIT_FAILURE);
+        }
+
+        pthread_join(pthread1, nullptr);
+        pthread_join(pthread2, nullptr);
+
         threadMerge(node);
     }
 }
@@ -147,7 +218,7 @@ void groupByAgg(
 ) {
     Relation* inKeys = project(in, numGrpCols, grpColIdxs);
     Relation* inVals = project(in, numAggCols, aggColIdxs);
-    size_t treeDepth = static_cast<size_t>(std::ceil(std::log2(std::thread::hardware_concurrency())));
+    //size_t treeDepth = static_cast<size_t>(std::ceil(std::log2(NUM_CORES)));
 
     TreeNode* root = new TreeNode(
         inKeys,
@@ -156,7 +227,7 @@ void groupByAgg(
         numAggCols,
         aggFuncs
     );
-    buildTree(root, treeDepth);
+    buildRoot(root, NUM_CORES);
 
     // Initialize the result relation and copy data from the root node.
     res->numRows = (*root->ht1).size();
