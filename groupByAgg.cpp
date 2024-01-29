@@ -37,6 +37,8 @@ void* threadFunction(void* arg) {
     Row* keys = initRow(params->inKeys);
     Row* vals = initRow(params->inVals);
 
+    (*params->ht).reserve((params->end-params->start)/2+(params->end-params->start)/6);
+
     for (size_t r = params->start; r < params->end; ++r) {
         getRow(keys, params->inKeys, r);
         getRow(vals, params->inVals, r);
