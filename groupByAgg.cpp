@@ -49,11 +49,13 @@ void* threadFunction(void* arg) {
             for (size_t c = 0; c < params->numAggCols; ++c) {
                 int64_t val = getValueInt64(vals, c);
                 switch (params->aggFuncs[c]) {
-                    case AggFunc::SUM: accs[c] += val; break;
-                    case AggFunc::MIN: accs[c] = std::min(accs[c], val); break;
-                    case AggFunc::MAX: accs[c] = std::max(accs[c], val); break;
-                    default: exit(EXIT_FAILURE);
-                }
+                        case AggFunc::SUM: accs[c] += val; break;
+                        case AggFunc::MIN: accs[c] = std::min(accs[c], val); break;
+                        case AggFunc::MAX: accs[c] = std::max(accs[c], val); break;
+                        default: 
+                            std::cout << "Error: Unknown aggregation function encountered." << std::endl;
+                            exit(EXIT_FAILURE);
+                    }
             }
         } else {
             // This key combination is not in the hash-table yet.
@@ -109,6 +111,7 @@ void groupByAgg(
     }
 
     std::unordered_map<Row, int64_t*>& ht = threadHashTables[0];
+    ht.reserve(threadHashTables.size()*threadHashTables[0].size());
     for (size_t i = 1; i < numThreads; i++) {
         for (auto entry : threadHashTables[i]) {  
             auto*& accs = ht[entry.first];
@@ -122,6 +125,7 @@ void groupByAgg(
                             std::cout << "Error: Unknown aggregation function encountered." << std::endl;
                             exit(EXIT_FAILURE);
                     }
+                    
                 }
                 free(entry.second);
                 free(entry.first.values);
