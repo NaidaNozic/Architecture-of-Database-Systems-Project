@@ -15,13 +15,13 @@
  */
 
 // The number of physical cores.
-#define NUM_CORES 0
+#define NUM_CORES 6
 
 // The size of the level 1 data cache in bytes.
-#define L1_DATA_CACHE_SIZE_BYTES 0
+#define L1_DATA_CACHE_SIZE_BYTES 384000
 // The size of the level 2 cache in bytes.
-#define L2_CACHE_SIZE_BYTES 0
+#define L2_CACHE_SIZE_BYTES 3000000
 // The size of the level 3 cache in bytes.
-#define L3_CACHE_SIZE_BYTES 0
+#define L3_CACHE_SIZE_BYTES 16000000
 
 #endif // HARDWARE_H
