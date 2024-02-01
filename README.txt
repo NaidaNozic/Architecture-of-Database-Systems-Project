@@ -1,11 +1,17 @@
 ############################
-## ADBS WS2021/22 Project ##
+## ADBS WS2023/24 Project ##
 ############################
 
 NOTE: Developed and compiled in gcc version 9.3.0
         
 Quick Start Guide
 -----------------
+
+The project implements a group-by aggregation database functionality. The "groupByAggBaseline" contains 
+the naive version, while the groupByAgg uses multithreading and local recent cache to improve the speedup up to x9.
+
+# Getting started
+Insert the number of cores and L1, L2, L3 cache sizes into the relevant fields in "hardware.h".
 
 # Compile and run unit tests
 make unit_test
